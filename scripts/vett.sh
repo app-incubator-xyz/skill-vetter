@@ -105,27 +105,30 @@ scan_skill_analyzer() {
     fi
 
     local result
-    result=$(skill-scanner scan "$SKILL_DIR" --format json 2>/dev/null || echo '{"severity":"unknown"}')
-    
-    local severity
-    severity=$(echo "$result" | jq -r '.severity // "unknown"')
-    
-    case "$severity" in
-        critical|high)
-            append "❌ skill-scanner: $severity severity - $(echo "$result" | jq -r '.description // "unknown issue"')"
-            echo "                      ❌ FAIL ($severity)"
-            ((FAILURES++)) || true
-            ;;
-        medium)
-            append "⚠️  skill-scanner: Medium severity - $(echo "$result" | jq -r '.description // "unknown issue"')"
-            echo "                      ⚠️  WARN (medium)"
-            ((WARNINGS++)) || true
-            ;;
-        low|none|unknown)
-            append "✅ skill-scanner: No critical vulnerabilities found"
-            echo "                      ✅ PASS"
-            ;;
-    esac
+    result=$(skill-scanner scan "$SKILL_DIR" --format json 2>/dev/null || echo '{}')
+
+    # Aggregate by per-finding severity (top-level .severity is null in v2.x)
+    local critical_count high_count medium_count
+    critical_count=$(echo "$result" | jq '[.findings[]? | select((.severity // "" | ascii_upcase) == "CRITICAL")] | length' 2>/dev/null || echo "0")
+    high_count=$(echo "$result" | jq '[.findings[]? | select((.severity // "" | ascii_upcase) == "HIGH")] | length' 2>/dev/null || echo "0")
+    medium_count=$(echo "$result" | jq '[.findings[]? | select((.severity // "" | ascii_upcase) == "MEDIUM")] | length' 2>/dev/null || echo "0")
+
+    if [ "$critical_count" -gt 0 ] || [ "$high_count" -gt 0 ]; then
+        local sev_label="HIGH"
+        [ "$critical_count" -gt 0 ] && sev_label="CRITICAL"
+        append "❌ skill-scanner: $critical_count CRITICAL, $high_count HIGH findings"
+        echo "$result" | jq -r '.findings[]? | select((.severity // "" | ascii_upcase) == "CRITICAL" or (.severity // "" | ascii_upcase) == "HIGH") | "   → \(.rule_id // .title): \(.description // "" | gsub("\n"; " ")) (\(.file_path // "?"):\(.line_number // .line // "?"))"' 2>/dev/null
+        echo "                      ❌ FAIL ($sev_label)"
+        ((FAILURES++)) || true
+    elif [ "$medium_count" -gt 0 ]; then
+        append "⚠️  skill-scanner: $medium_count MEDIUM severity findings"
+        echo "$result" | jq -r '.findings[]? | select((.severity // "" | ascii_upcase) == "MEDIUM") | "   → \(.rule_id // .title): \(.description // "" | gsub("\n"; " ")) (\(.file_path // "?"):\(.line_number // .line // "?"))"' 2>/dev/null
+        echo "                      ⚠️  WARN (medium)"
+        ((WARNINGS++)) || true
+    else
+        append "✅ skill-scanner: No critical vulnerabilities found"
+        echo "                      ✅ PASS"
+    fi
 }
 
 # ── Scanner 3: secrets-scan (hardcoded credentials) ─────────────────────────
@@ -135,8 +138,8 @@ scan_secrets() {
     
     local found_secrets=0
     
-    # Check for common secret patterns
-    if grep -rqE "(api_key|apikey|secret|token|password|credential).*=.*['\"][A-Za-z0-9_\-]{16,}['\"]" "$SKILL_DIR" 2>/dev/null; then
+    # Check for common secret patterns (case-insensitive — keys often UPPER_CASE)
+    if grep -rqEi "(api[_-]?key|secret|token|password|credential|bearer)\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}['\"]" "$SKILL_DIR" 2>/dev/null; then
         found_secrets=1
     fi
 
